@@ -1,3 +1,4 @@
 flask
 python-telegram-bot==22.7
 matplotlib
+gigachat
