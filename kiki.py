@@ -11,7 +11,7 @@ from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, Con
 # CONFIG
 # =====================
 TOKEN = "8786833012:AAG1uQ_lOtu0cNvo4xejFgLpQDC7OloCJSo"
-WEBHOOK_URL = "https://your-domain.com/webhook"
+WEBHOOK_URL = "https://kiki-bot.onrender.com"
 
 bot = Bot(token=TOKEN)
 
