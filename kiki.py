@@ -16,7 +16,41 @@ WEBHOOK_URL = "https://kiki-bot.onrender.com"
 bot = Bot(token=TOKEN)
 
 app = Flask("KiKi")
+from flask import Flask, request
+from telegram import Update
+from telegram.ext import ApplicationBuilder
 
+app = Flask(__name__)
+
+# 👇 ВАЖНО: твои переменные
+TOKEN = os.getenv("TELEGRAM_TOKEN")
+
+application = ApplicationBuilder().token(TOKEN).build()
+bot = application.bot
+
+WEBHOOK_URL = "https://kiki-bot.onrender.com/webhook"
+
+
+# ======================
+# 🔗 УСТАНОВКА WEBHOOK
+# ======================
+@app.route('/set_webhook')
+def set_webhook():
+    try:
+        result = bot.set_webhook(url=WEBHOOK_URL)
+        return f"Webhook set: {result}"
+    except Exception as e:
+        return f"Error: {e}"
+
+
+# ======================
+# 📩 ПРИЁМ СООБЩЕНИЙ
+# ======================
+@app.route('/webhook', methods=['POST'])
+def webhook():
+    update = Update.de_json(request.get_json(force=True), bot)
+    application.process_update(update)
+    return "ok"
 # =====================
 # DATABASE
 # =====================
