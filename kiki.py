@@ -177,10 +177,13 @@ def webhook():
     app_bot.update_queue.put_nowait(update)
     return "ok"
 
-@app.route("/set_webhook")
+@app.route('/set_webhook')
 def set_webhook():
-    app_bot.bot.set_webhook(WEBHOOK_URL)
-    return "OK"
+    try:
+        result = bot.set_webhook(url=WEBHOOK_URL)
+        return f"Webhook set result: {result}"
+    except Exception as e:
+        return f"Error: {e}"
 
 # =====================
 # RUN
