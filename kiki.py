@@ -7,57 +7,53 @@ from flask import Flask, request, jsonify
 from telegram import Bot, Update, ReplyKeyboardMarkup
 
 # =========================
-# 🔑 CONFIG (берёт из Render)
+# 🔑 КОНФИГУРАЦИЯ
 # =========================
 TOKEN = os.getenv("TELEGRAM_TOKEN")
 WEBHOOK_URL = os.getenv("WEBHOOK_URL")
 
-# Инициализация бота
+# Проверка наличия ключей
+if not TOKEN or not WEBHOOK_URL:
+    print("❌ ОШИБКА: TELEGRAM_TOKEN или WEBHOOK_URL не установлены в Environment Variables!")
+
 bot = Bot(token=TOKEN)
 app = Flask(__name__)
 
 # =========================
-# 📊 DATABASE
+# 📊 БАЗА ДАННЫХ
 # =========================
-def get_db_connection():
+def get_db():
     conn = sqlite3.connect("kiki.db", check_same_thread=False)
     return conn
 
-# Создание таблиц при запуске
-conn = get_db_connection()
-cursor = conn.cursor()
-cursor.execute("""
-CREATE TABLE IF NOT EXISTS results (
-    user_id INTEGER,
-    score INTEGER,
-    date TEXT
-)
-""")
-conn.commit()
+# Инициализация базы данных
+with get_db() as conn:
+    conn.execute("""
+    CREATE TABLE IF NOT EXISTS results (
+        user_id INTEGER,
+        score INTEGER,
+        date TEXT
+    )
+    """)
 
 def save_result(user_id, score):
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    cursor.execute("INSERT INTO results VALUES (?, ?, ?)",
-                   (user_id, score, str(datetime.date.today())))
-    conn.commit()
+    with get_db() as conn:
+        conn.execute("INSERT INTO results VALUES (?, ?, ?)",
+                     (user_id, score, str(datetime.date.today())))
 
 def get_history(user_id):
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    cursor.execute("SELECT score, date FROM results WHERE user_id=?", (user_id,))
-    return cursor.fetchall()
+    with get_db() as conn:
+        cursor = conn.execute("SELECT score, date FROM results WHERE user_id=? ORDER BY rowid DESC LIMIT 10", (user_id,))
+        return cursor.fetchall()
 
 # =========================
-# 🧠 ДАННЫЕ И ЛОГИКА
+# 🎮 ЛОГИКА БОТА
 # =========================
 keyboard = ReplyKeyboardMarkup(
     [["🧠 Тест", "💬 AI"], ["📊 График", "📈 Статистика"]],
     resize_keyboard=True
 )
 
-user_state = {}
-ai_mode = set()
 questions = [
     "Ты часто устаёшь?",
     "Ты плохо спишь?",
@@ -66,11 +62,9 @@ questions = [
     "Чувствуешь ли ты тревогу?"
 ]
 
-# Асинхронная отправка сообщений
-async def send_reply(chat_id, text, reply_markup=None):
-    await bot.send_message(chat_id=chat_id, text=text, reply_markup=reply_markup)
+user_state = {}
+ai_mode = set()
 
-# Основной обработчик логики
 async def process_update(update: Update):
     if not update.message or not update.message.text:
         return
@@ -82,59 +76,60 @@ async def process_update(update: Update):
     if text == "/start":
         ai_mode.discard(user_id)
         user_state.pop(user_id, None)
-        await send_reply(user_id, "Привет! Я KiKi 🌿 Выбери действие:", keyboard)
+        await bot.send_message(chat_id=user_id, text="Привет! Я KiKi 🌿 Твой AI-помощник.", reply_markup=keyboard)
         return
 
     # Режим AI
     if user_id in ai_mode and text != "❌ Выход":
-        await send_reply(user_id, f"KiKi 🌿: Я тебя слышу. Ты сказал: '{text}'")
+        await bot.send_message(chat_id=user_id, text=f"KiKi 🌿: Я услышала тебя. Ты написал: '{text}'")
         return
 
     # Логика теста
     if text == "🧠 Тест":
         user_state[user_id] = {"step": 0, "score": 0}
-        await send_reply(user_id, questions[0])
+        await bot.send_message(chat_id=user_id, text=questions[0])
         return
 
     if user_id in user_state:
         st = user_state[user_id]
-        if text.lower() in ["да", "yes", "ага"]:
+        if text.lower() in ["да", "yes", "ага", "д"]:
             st["score"] += 1
         st["step"] += 1
 
         if st["step"] < len(questions):
-            await send_reply(user_id, questions[st["step"]])
+            await bot.send_message(chat_id=user_id, text=questions[st["step"]])
         else:
             score = int((st["score"] / len(questions)) * 100)
             save_result(user_id, score)
-            await send_reply(user_id, f"📊 Твой результат: {score}%\nKiKi всегда рядом 🌿", keyboard)
+            await bot.send_message(chat_id=user_id, text=f"📊 Результат: {score}%\nKiKi рядом. 🌿", reply_markup=keyboard)
             del user_state[user_id]
         return
 
     # Кнопки меню
     if text == "💬 AI":
         ai_mode.add(user_id)
-        await send_reply(user_id, "Режим AI включён. Напиши мне что-нибудь! (Для выхода нажми /start)")
+        await bot.send_message(chat_id=user_id, text="AI режим включён. Расскажи, что у тебя на душе? (Выход — /start)")
     
     elif text == "📈 Статистика":
         data = get_history(user_id)
         if not data:
-            await send_reply(user_id, "Данных пока нет. Пройди тест!")
+            await bot.send_message(chat_id=user_id, text="Статистики пока нет.")
         else:
             avg = sum(x[0] for x in data) / len(data)
-            await send_reply(user_id, f"Твой средний уровень стресса: {round(avg, 1)}%")
+            await bot.send_message(chat_id=user_id, text=f"Твой средний уровень стресса: {round(avg, 1)}%")
 
     elif text == "📊 График":
         data = get_history(user_id)
         if len(data) < 2:
-            await send_reply(user_id, "Нужно пройти тест хотя бы 2 раза для графика.")
+            await bot.send_message(chat_id=user_id, text="Нужно пройти тест хотя бы 2 раза.")
             return
 
-        values = [x[0] for x in data[-10:]]
-        dates = [x[1] for x in data[-10:]]
-        plt.figure()
-        plt.plot(dates, values, marker="o", color="green")
-        plt.title("Динамика стресса")
+        scores = [x[0] for x in data][::-1]
+        dates = [x[1] for x in data][::-1]
+        
+        plt.figure(figsize=(8, 4))
+        plt.plot(dates, scores, marker='o', color='green')
+        plt.title("Твой прогресс")
         plt.xticks(rotation=45)
         plt.tight_layout()
         
@@ -147,35 +142,35 @@ async def process_update(update: Update):
         os.remove(path)
 
 # =========================
-# 🌐 FLASK ROUTES (Webhook)
+# 🌐 ROUTES (Flask)
 # =========================
 @app.route("/webhook", methods=["POST"])
-def webhook():
-    if request.method == "POST":
-        data = request.get_json(force=True)
-        update = Update.de_json(data, bot)
-        # Запускаем асинхронную логику
-        asyncio.run(process_update(update))
-        return "ok"
-    return "error"
+async def webhook():
+    # Асинхронно обрабатываем входящее сообщение
+    update = Update.de_json(request.get_json(force=True), bot)
+    await process_update(update)
+    return "ok"
 
 @app.route("/set_webhook")
-def set_webhook():
-    # Исправленная асинхронная установка вебхука
-    async def setup():
+async def set_webhook():
+    try:
+        # Прямой вызов асинхронных методов бота
         await bot.delete_webhook()
-        return await bot.set_webhook(url=f"{WEBHOOK_URL}/webhook")
-    
-    result = asyncio.run(setup())
-    return jsonify({"ok": True, "result": str(result)})
+        # Важно: добавляем /webhook в конец URL
+        success = await bot.set_webhook(url=f"{WEBHOOK_URL}/webhook")
+        if success:
+            return jsonify({"ok": True, "message": "Webhook set successfully!"})
+        return jsonify({"ok": False, "message": "Failed to set webhook."})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)})
 
 @app.route("/")
 def home():
     return "KiKi is alive 💎"
 
 # =========================
-# ▶️ RUN
+# ▶️ ЗАПУСК
 # =========================
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 5000))
-    app.run(host="0.0.0.0", port=port)
+    # Render сам подставит нужный PORT
+    app.run(host="0.0.0.0", port=int(os.getenv("PORT", 5000)))
