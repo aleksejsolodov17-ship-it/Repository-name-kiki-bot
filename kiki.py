@@ -18,26 +18,25 @@ bot = Bot(token=TOKEN)
 app = Flask(__name__)
 
 # =========================
-# 🧠 МОЗГ GIGACHAT (РФ)
+# 🧠 МОЗГ GIGACHAT
 # =========================
 def ask_ai(text):
     if not GIGA_KEY:
-        return "KiKi 🌿: Я тебя слышу! (GigaChat не настроен в Environment)"
+        return "KiKi 🌿: Привет! Настрой GIGACHAT_CREDENTIALS в панели Render."
     
     try:
-        # Авторизация и запрос к Сберу
-        # verify_ssl_certs=False нужен для работы на некоторых серверах без сертификатов Сбера
-        with GigaChat(credentials=GIGA_KEY, verify_ssl_certs=False) as giga:
+        # scope="GIGACHAT_API_PERS" — критически важен для бесплатных ключей
+        with GigaChat(credentials=GIGA_KEY, verify_ssl_certs=False, scope="GIGACHAT_API_PERS") as giga:
             response = giga.chat({
                 "messages": [
-                    {"role": "system", "content": "Ты KiKi — добрый ИИ-психолог для подростков. Отвечай тепло, коротко и только на русском языке. Поддерживай и давай советы против стресса."},
+                    {"role": "system", "content": "Ты KiKi — добрый ИИ-психолог. Отвечай тепло, коротко и по-русски."},
                     {"role": "user", "content": text}
                 ]
             })
             return response.choices[0].message.content
     except Exception as e:
-        print(f"Ошибка GigaChat: {e}")
-        return "KiKi 🌿: У меня возникла небольшая техническая заминка, но я всё равно рядом! Попробуй написать еще раз?"
+        print(f"❌ Ошибка GigaChat: {e}")
+        return "KiKi 🌿: Я немного задумалась, но я всё равно рядом. Попробуй ещё раз?"
 
 # =========================
 # 📊 БАЗА ДАННЫХ
@@ -53,11 +52,6 @@ def save_result(user_id, score):
     with get_db() as conn:
         conn.execute("INSERT INTO results VALUES (?, ?, ?)", (user_id, score, str(datetime.date.today())))
 
-def get_history(user_id):
-    with get_db() as conn:
-        cursor = conn.execute("SELECT score, date FROM results WHERE user_id=? ORDER BY rowid DESC", (user_id,))
-        return [row[0] for row in cursor.fetchall()]
-
 # =========================
 # 🎮 ЛОГИКА БОТА
 # =========================
@@ -71,14 +65,13 @@ async def process_update(update: Update):
     if not update.message or not update.message.text: return
     text, user_id = update.message.text, update.message.from_user.id
 
-    # 1. КОМАНДЫ
     if text == "/start":
         ai_mode.discard(user_id)
         user_state.pop(user_id, None)
-        await bot.send_message(chat_id=user_id, text="Привет! Я KiKi 🌿 Твой AI-помощник против стресса. Выбери действие:", reply_markup=keyboard)
+        await bot.send_message(chat_id=user_id, text="Привет! Я KiKi 🌿 Твой AI-помощник. Чем займемся?", reply_markup=keyboard)
         return
 
-    # 2. ТЕСТ
+    # Логика Теста
     if text == "🧠 Тест":
         ai_mode.discard(user_id)
         user_state[user_id] = {"step": 0, "score": 0}
@@ -87,59 +80,21 @@ async def process_update(update: Update):
 
     if user_id in user_state:
         st = user_state[user_id]
-        if text.lower() in ["да", "yes", "ага", "д"]: st["score"] += 1
+        if text.lower() in ["да", "yes", "ага"]: st["score"] += 1
         st["step"] += 1
-
         if st["step"] < len(questions):
             await bot.send_message(chat_id=user_id, text=questions[st["step"]])
         else:
             score = min(int((st["score"] / len(questions)) * 100), 100)
             save_result(user_id, score)
-            await bot.send_message(chat_id=user_id, text=f"📊 Твой результат: {score}%\nKiKi рядом. Мы можем обсудить это в ИИ-чате! 🌿", reply_markup=keyboard)
+            await bot.send_message(chat_id=user_id, text=f"📊 Результат: {score}%\nKiKi рядом. Давай пообщаемся в ИИ-чате? 🌿", reply_markup=keyboard)
             user_state.pop(user_id, None)
         return
 
-    # 3. СТАТИСТИКА И ГРАФИК
-    if text == "📈 Статистика":
-        data = get_history(user_id)
-        if not data:
-            await bot.send_message(chat_id=user_id, text="Данных пока нет 📊")
-        else:
-            avg = sum(data) / len(data)
-            await bot.send_message(chat_id=user_id, text=f"Твой средний уровень стресса: {round(avg, 1)}% 🌿")
-        return
-
-    if text == "📊 График":
-        with get_db() as conn:
-            data = conn.execute("SELECT score, date FROM results WHERE user_id=? ORDER BY rowid DESC LIMIT 10", (user_id,)).fetchall()
-        
-        if len(data) < 2:
-            await bot.send_message(chat_id=user_id, text="Нужно хотя бы 2 результата для графика 📈")
-            return
-        
-        scores = [x[0] for x in data][::-1]
-        dates = [x[1] for x in data][::-1]
-        
-        plt.figure(figsize=(8, 4))
-        plt.plot(dates, scores, marker='o', color='#4CAF50', linewidth=2)
-        plt.title("Динамика твоего состояния")
-        plt.ylim(0, 105)
-        plt.xticks(rotation=45)
-        plt.tight_layout()
-        
-        path = f"graph_{user_id}.png"
-        plt.savefig(path)
-        plt.close()
-        
-        with open(path, "rb") as photo:
-            await bot.send_photo(chat_id=user_id, photo=photo)
-        os.remove(path)
-        return
-
-    # 4. AI ЧАТ
+    # Режим AI
     if text == "💬 AI":
         ai_mode.add(user_id)
-        await bot.send_message(chat_id=user_id, text="Режим AI включён! Расскажи, что тебя беспокоит? 🌿 (Выход — /start)")
+        await bot.send_message(chat_id=user_id, text="Режим AI включён. Расскажи, что тебя беспокоит? (Для выхода — /start)")
         return
 
     if user_id in ai_mode:
@@ -149,13 +104,16 @@ async def process_update(update: Update):
         return
 
 # =========================
-# 🌐 ROUTES (Flask + Webhook)
+# 🌐 ROUTES
 # =========================
 @app.route("/webhook", methods=["POST"])
-async def webhook():
+def webhook():
     data = request.get_json(force=True)
     update = Update.de_json(data, bot)
-    await process_update(update)
+    # Используем create_task для неблокирующей работы
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    loop.run_until_complete(process_update(update))
     return "ok"
 
 @app.route("/")
@@ -168,12 +126,17 @@ def home():
 if __name__ == "__main__":
     async def on_startup():
         try:
-            await bot.delete_webhook()
+            # Удаляем вебхук и ставим заново, очищая очередь сообщений
+            await bot.delete_webhook(drop_pending_updates=True)
             await bot.set_webhook(url=f"{WEBHOOK_URL}/webhook")
-            print("✅ Webhook установлен автоматически!")
+            print("✅ Webhook установлен успешно!")
         except Exception as e:
-            print(f"❌ Ошибка авто-установки: {e}")
+            print(f"❌ Ошибка установки вебхука: {e}")
 
-    # Запускаем установку вебхука один раз перед стартом сервера
-    asyncio.run(on_startup())
+    # Запускаем один раз при старте
+    try:
+        asyncio.run(on_startup())
+    except:
+        pass
+
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
