@@ -1,30 +1,31 @@
 import os
 import sqlite3
 import datetime
+import asyncio
 import matplotlib.pyplot as plt
-
 from flask import Flask, request, jsonify
 from telegram import Bot, Update, ReplyKeyboardMarkup
 
 # =========================
-# CONFIG
+# 🔑 CONFIG (берёт из Render)
 # =========================
 TOKEN = os.getenv("TELEGRAM_TOKEN")
 WEBHOOK_URL = os.getenv("WEBHOOK_URL")
 
-if not TOKEN:
-    raise Exception("TELEGRAM_TOKEN is missing")
-
+# Инициализация бота
 bot = Bot(token=TOKEN)
-
 app = Flask(__name__)
 
 # =========================
-# DATABASE
+# 📊 DATABASE
 # =========================
-conn = sqlite3.connect("kiki.db", check_same_thread=False)
-cursor = conn.cursor()
+def get_db_connection():
+    conn = sqlite3.connect("kiki.db", check_same_thread=False)
+    return conn
 
+# Создание таблиц при запуске
+conn = get_db_connection()
+cursor = conn.cursor()
 cursor.execute("""
 CREATE TABLE IF NOT EXISTS results (
     user_id INTEGER,
@@ -34,29 +35,21 @@ CREATE TABLE IF NOT EXISTS results (
 """)
 conn.commit()
 
-
 def save_result(user_id, score):
-    cursor.execute(
-        "INSERT INTO results VALUES (?, ?, ?)",
-        (user_id, score, str(datetime.date.today()))
-    )
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute("INSERT INTO results VALUES (?, ?, ?)",
+                   (user_id, score, str(datetime.date.today())))
     conn.commit()
 
-
 def get_history(user_id):
+    conn = get_db_connection()
+    cursor = conn.cursor()
     cursor.execute("SELECT score, date FROM results WHERE user_id=?", (user_id,))
     return cursor.fetchall()
 
-
 # =========================
-# AI (stub)
-# =========================
-def ai(text):
-    return f"KiKi 🌿: {text}"
-
-
-# =========================
-# UI
+# 🧠 ДАННЫЕ И ЛОГИКА
 # =========================
 keyboard = ReplyKeyboardMarkup(
     [["🧠 Тест", "💬 AI"], ["📊 График", "📈 Статистика"]],
@@ -65,136 +58,124 @@ keyboard = ReplyKeyboardMarkup(
 
 user_state = {}
 ai_mode = set()
-
 questions = [
     "Ты часто устаёшь?",
     "Ты плохо спишь?",
-    "Ты переживаешь?",
-    "Ты откладываешь дела?",
-    "Есть тревога?"
+    "Ты много переживаешь?",
+    "Ты откладываешь дела на потом?",
+    "Чувствуешь ли ты тревогу?"
 ]
 
+# Асинхронная отправка сообщений
+async def send_reply(chat_id, text, reply_markup=None):
+    await bot.send_message(chat_id=chat_id, text=text, reply_markup=reply_markup)
 
-# =========================
-# TELEGRAM HANDLER CORE
-# =========================
-def handle_message(update: Update):
+# Основной обработчик логики
+async def process_update(update: Update):
+    if not update.message or not update.message.text:
+        return
+
     text = update.message.text
     user_id = update.message.from_user.id
 
-    # AI MODE
-    if user_id in ai_mode:
-        update.message.reply_text(ai(text))
+    # Команда /start
+    if text == "/start":
+        ai_mode.discard(user_id)
+        user_state.pop(user_id, None)
+        await send_reply(user_id, "Привет! Я KiKi 🌿 Выбери действие:", keyboard)
         return
 
-    # START TEST
+    # Режим AI
+    if user_id in ai_mode and text != "❌ Выход":
+        await send_reply(user_id, f"KiKi 🌿: Я тебя слышу. Ты сказал: '{text}'")
+        return
+
+    # Логика теста
     if text == "🧠 Тест":
         user_state[user_id] = {"step": 0, "score": 0}
-        update.message.reply_text(questions[0])
+        await send_reply(user_id, questions[0])
         return
 
-    # TEST FLOW
     if user_id in user_state:
         st = user_state[user_id]
-
-        if text.lower() in ["да", "yes"]:
+        if text.lower() in ["да", "yes", "ага"]:
             st["score"] += 1
-
         st["step"] += 1
 
         if st["step"] < len(questions):
-            update.message.reply_text(questions[st["step"]])
+            await send_reply(user_id, questions[st["step"]])
         else:
             score = int((st["score"] / len(questions)) * 100)
-
             save_result(user_id, score)
-
-            update.message.reply_text(
-                f"📊 Результат: {score}%\nKiKi рядом 🌿",
-                reply_markup=keyboard
-            )
-
+            await send_reply(user_id, f"📊 Твой результат: {score}%\nKiKi всегда рядом 🌿", keyboard)
             del user_state[user_id]
         return
 
-    # AI MODE ENABLE
+    # Кнопки меню
     if text == "💬 AI":
         ai_mode.add(user_id)
-        update.message.reply_text("AI режим включён 🌿")
-        return
-
-    # STATS
-    if text == "📈 Статистика":
+        await send_reply(user_id, "Режим AI включён. Напиши мне что-нибудь! (Для выхода нажми /start)")
+    
+    elif text == "📈 Статистика":
         data = get_history(user_id)
         if not data:
-            update.message.reply_text("Нет данных 📊")
-            return
+            await send_reply(user_id, "Данных пока нет. Пройди тест!")
+        else:
+            avg = sum(x[0] for x in data) / len(data)
+            await send_reply(user_id, f"Твой средний уровень стресса: {round(avg, 1)}%")
 
-        avg = sum(x[0] for x in data) / len(data)
-        update.message.reply_text(f"Средний уровень: {round(avg,1)}%")
-        return
-
-    # GRAPH
-    if text == "📊 График":
+    elif text == "📊 График":
         data = get_history(user_id)
-        if not data:
-            update.message.reply_text("Нет данных 📊")
+        if len(data) < 2:
+            await send_reply(user_id, "Нужно пройти тест хотя бы 2 раза для графика.")
             return
 
         values = [x[0] for x in data[-10:]]
         dates = [x[1] for x in data[-10:]]
-
         plt.figure()
-        plt.plot(dates, values, marker="o")
+        plt.plot(dates, values, marker="o", color="green")
+        plt.title("Динамика стресса")
         plt.xticks(rotation=45)
         plt.tight_layout()
-
+        
         path = f"graph_{user_id}.png"
         plt.savefig(path)
         plt.close()
-
-        update.message.reply_photo(photo=open(path, "rb"))
+        
+        with open(path, "rb") as photo:
+            await bot.send_photo(chat_id=user_id, photo=photo)
         os.remove(path)
-        return
-
-    update.message.reply_text(ai(text))
-
 
 # =========================
-# WEBHOOK ROUTE
+# 🌐 FLASK ROUTES (Webhook)
 # =========================
 @app.route("/webhook", methods=["POST"])
 def webhook():
-    data = request.get_json(force=True)
-    update = Update.de_json(data, bot)
-    handle_message(update)
-    return "ok"
+    if request.method == "POST":
+        data = request.get_json(force=True)
+        update = Update.de_json(data, bot)
+        # Запускаем асинхронную логику
+        asyncio.run(process_update(update))
+        return "ok"
+    return "error"
 
-
-# =========================
-# SET WEBHOOK
-# =========================
 @app.route("/set_webhook")
 def set_webhook():
-    try:
-        bot.delete_webhook()
-        result = bot.set_webhook(url=WEBHOOK_URL)
-        return jsonify({"ok": True, "result": str(result)})
-    except Exception as e:
-        return jsonify({"ok": False, "error": str(e)})
+    # Исправленная асинхронная установка вебхука
+    async def setup():
+        await bot.delete_webhook()
+        return await bot.set_webhook(url=f"{WEBHOOK_URL}/webhook")
+    
+    result = asyncio.run(setup())
+    return jsonify({"ok": True, "result": str(result)})
 
-
-# =========================
-# HOME (Render health check)
-# =========================
 @app.route("/")
 def home():
     return "KiKi is alive 💎"
 
-
 # =========================
-# RUN
+# ▶️ RUN
 # =========================
 if __name__ == "__main__":
-    print("💎 KiKi v3 PRODUCTION RUNNING")
-    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host="0.0.0.0", port=port)
