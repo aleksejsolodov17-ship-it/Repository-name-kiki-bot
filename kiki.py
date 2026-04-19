@@ -34,7 +34,8 @@ init_db()
 def save_memory(user_id, role, content):
     with sqlite3.connect("kiki.db") as conn:
         conn.execute("INSERT INTO memory VALUES (?, ?, ?, ?)", (user_id, role, content, datetime.datetime.now()))
-        conn.execute("DELETE FROM memory WHERE rowid IN (SELECT rowid FROM memory WHERE user_id = ? ORDER BY timestamp DESC LIMIT -1 OFFSET 8)")
+        # Удаляем старые сообщения, оставляя только последние 8 для контекста
+        conn.execute("DELETE FROM memory WHERE user_id = ? AND rowid NOT IN (SELECT rowid FROM memory WHERE user_id = ? ORDER BY timestamp DESC LIMIT 8)", (user_id, user_id))
 
 # =========================
 # 🧠 МОЗГ GIGACHAT
@@ -46,7 +47,8 @@ def ask_ai(user_id, text):
     
     try:
         with GigaChat(credentials=GIGA_KEY, verify_ssl_certs=False, scope="GIGACHAT_API_PERS") as giga:
-            sys_msg = f"Ты KiKi — теплый ИИ-психолог. Пользователя зовут {name}. Отвечай кратко, эмпатично, используй 🌿."
+            sys_msg = f"Ты KiKi — теплый ИИ-психолог. Пользователя зовут {name}. Отвечай кратко, эмпатично, используй эмодзи 🌿."
+            
             with sqlite3.connect("kiki.db") as conn:
                 rows = conn.execute("SELECT role, content FROM memory WHERE user_id = ? ORDER BY timestamp ASC", (user_id,)).fetchall()
                 history = [{"role": r, "content": c} for r, c in rows]
@@ -54,10 +56,12 @@ def ask_ai(user_id, text):
             messages = [{"role": "system", "content": sys_msg}] + history + [{"role": "user", "content": text}]
             response = giga.chat({"messages": messages})
             ans = response.choices[0].message.content
+            
             save_memory(user_id, "user", text)
             save_memory(user_id, "assistant", ans)
             return ans
-    except:
+    except Exception as e:
+        print(f"Ошибка ИИ: {e}")
         return "Я здесь, просто настраиваюсь на твою волну... ✨ О чем хочешь поговорить?"
 
 # =========================
@@ -79,6 +83,7 @@ def create_trend_chart(user_id):
     plt.plot(dates, scores, marker='o', color=color, linewidth=3)
     plt.fill_between(dates, scores, color=color, alpha=0.2)
     plt.ylim(0, 105)
+    plt.title("Твоя ментальная кривая 🌿", color=color)
     
     buf = io.BytesIO()
     plt.savefig(buf, format='png', bbox_inches='tight')
@@ -98,7 +103,7 @@ async def process_update(update: Update):
     if not update.message or not update.message.text: return
     text, user_id = update.message.text, update.message.from_user.id
 
-    # 1. ПРИОРИТЕТ: Команды
+    # 1. Приоритет: Команды
     if text == "/start":
         user_state.pop(user_id, None)
         with sqlite3.connect("kiki.db") as conn:
@@ -107,7 +112,7 @@ async def process_update(update: Update):
             user_state[user_id] = {"step": "naming"}
             await bot.send_message(user_id, "Привет! Я KiKi 🌿 Как мне к тебе обращаться?")
         else:
-            await bot.send_message(user_id, f"С возвращением, {user[0]}!", reply_markup=MAIN_KB)
+            await bot.send_message(user_id, f"С возвращением, {user[0]}! Рада тебя видеть.", reply_markup=MAIN_KB)
         return
 
     if text == "/name":
@@ -115,7 +120,7 @@ async def process_update(update: Update):
         await bot.send_message(user_id, "Ой, я что-то напутала! Как твое настоящее имя? ✨")
         return
 
-    # 2. ПРИОРИТЕТ: Активные состояния (ввод данных)
+    # 2. Приоритет: Состояния (ввод данных)
     if user_id in user_state:
         state = user_state[user_id].get("step")
         
@@ -133,7 +138,8 @@ async def process_update(update: Update):
             with sqlite3.connect("kiki.db") as conn:
                 conn.execute("INSERT INTO gratitude VALUES (?, ?, ?)", (user_id, text, str(datetime.date.today())))
             user_state.pop(user_id)
-            await bot.send_message(user_id, ask_ai(user_id, f"Я записал благодарность: {text}."), reply_markup=MAIN_KB)
+            answer = ask_ai(user_id, f"Я записал благодарность: {text}. Порадуйся за меня.")
+            await bot.send_message(user_id, answer, reply_markup=MAIN_KB)
             return
 
     # 3. Кнопки меню
@@ -164,7 +170,8 @@ async def process_update(update: Update):
     # 4. По умолчанию — AI Чат
     if text != "↩️ Назад":
         await bot.send_chat_action(user_id, "typing")
-        await bot.send_message(user_id, ask_ai(user_id, text))
+        answer = ask_ai(user_id, text)
+        await bot.send_message(user_id, answer)
 
 # =========================
 # ⏰ ПЛАНИРОВЩИК
