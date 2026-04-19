@@ -1,5 +1,4 @@
-import os, sqlite3, datetime, asyncio, io
-import matplotlib.pyplot as plt
+import os, sqlite3, datetime, asyncio, io, threading
 from flask import Flask, request
 from telegram import Bot, Update, ReplyKeyboardMarkup
 from gigachat import GigaChat
@@ -12,7 +11,7 @@ GIGA_KEY = os.getenv("GIGACHAT_CREDENTIALS")
 bot = Bot(token=TOKEN)
 app = Flask(__name__)
 
-# СУПЕР-СКОРОСТЬ: Глобальный клиент инициализируется один раз
+# Глобальный клиент для СУПЕР-СКОРОСТИ (инициализируется один раз)
 giga = GigaChat(credentials=GIGA_KEY, verify_ssl_certs=False, scope="GIGACHAT_API_PERS")
 
 # =========================
@@ -34,71 +33,59 @@ def db_query(sql, params=(), is_select=True):
         return res if is_select else None
 
 # =========================
-# 🎮 КОНТЕНТ И КЛАВИАТУРЫ
+# 🕹️ ЛОГИКА ОБРАБОТКИ
 # =========================
 MAIN_KB = ReplyKeyboardMarkup([["🧠 Тест", "💬 AI"], ["📓 Дневник", "📊 Аналитика"], ["🎨 Тема", "🧘 Помощь"]], resize_keyboard=True)
 TEST_QS = ["Как твоя энергия? (1-5)", "Уровень тревоги? (1-5)", "Качество сна? (1-5)", "Время на отдых? (1-5)"]
-TIPS = {"🧘 Помощь": "Техника 5-4-3-2-1: Назови 5 предметов, которые видишь, 4, которые можешь потрогать, 3 звука, 2 запаха, 1 вкус. ✨"}
 
-# =========================
-# 🕹️ ГЛАВНАЯ ЛОГИКА
-# =========================
 async def handle_update(update: Update):
     if not update.message or not update.message.text: return
     text, user_id = update.message.text, update.message.from_user.id
     
     # Загружаем данные пользователя
-    u = db_query("SELECT name, state, test_step, test_score FROM users WHERE user_id = ?", (user_id,))
-    name, state, step, score = u[0] if u else ("друг", "idle", 0, 0)
+    raw_u = db_query("SELECT name, state, test_step, test_score FROM users WHERE user_id = ?", (user_id,))
+    name, state, step, score = raw_u[0] if raw_u else ("друг", "idle", 0, 0)
 
     # 1. Команды /start и /name
     if text in ["/start", "/name"]:
-        db_query("INSERT OR REPLACE INTO users (user_id, name, state) VALUES (?, ?, 'naming')", (user_id, name))
+        db_query("INSERT OR REPLACE INTO users (user_id, name, state) VALUES (?, ?, 'naming')", (user_id, name), False)
         await bot.send_message(user_id, "Привет! Я KiKi 🌿 Как мне к тебе обращаться?")
         return
 
     # 2. Регистрация имени
     if state == "naming":
         name = text.strip()[:15]
-        db_query("UPDATE users SET name = ?, state = 'idle' WHERE user_id = ?", (name, user_id))
-        await bot.send_message(user_id, f"Рада познакомиться, {name}! 😊", reply_markup=MAIN_KB)
+        db_query("UPDATE users SET name = ?, state = 'idle' WHERE user_id = ?", (name, user_id), False)
+        await bot.send_message(user_id, f"Рада познакомиться, {name}! 😊 Чем займемся?", reply_markup=MAIN_KB)
         return
 
     # 3. Пошаговый Тест
     if text == "🧠 Тест" or state == "testing":
         if text == "🧠 Тест":
-            db_query("UPDATE users SET state = 'testing', test_step = 0, test_score = 0 WHERE user_id = ?", (user_id,))
+            db_query("UPDATE users SET state = 'testing', test_step = 0, test_score = 0 WHERE user_id = ?", (user_id,), False)
             await bot.send_message(user_id, TEST_QS[0], reply_markup=ReplyKeyboardMarkup([["1","2","3","4","5"]], resize_keyboard=True))
         else:
             val = int(text) if text.isdigit() else 3
             if step + 1 < len(TEST_QS):
-                db_query("UPDATE users SET test_step = ?, test_score = ? WHERE user_id = ?", (step+1, score+val, user_id))
+                db_query("UPDATE users SET test_step = ?, test_score = ? WHERE user_id = ?", (step+1, score+val, user_id), False)
                 await bot.send_message(user_id, TEST_QS[step+1])
             else:
                 final = int(((score+val)/20)*100)
-                db_query("UPDATE users SET state = 'idle' WHERE user_id = ?", (user_id,))
+                db_query("UPDATE users SET state = 'idle' WHERE user_id = ?", (user_id,), False)
                 db_query("INSERT INTO results VALUES (?, ?, ?)", (user_id, final, str(datetime.date.today())), False)
                 await bot.send_message(user_id, f"Твой индекс благополучия: {final}% ✨", reply_markup=MAIN_KB)
         return
 
-    # 4. Функциональные кнопки
-    if text == "📊 Аналитика":
-        await bot.send_message(user_id, "Строю твой график... 📈 (функция в разработке)", reply_markup=MAIN_KB)
-        return
-
-    if text == "🧘 Помощь":
-        await bot.send_message(user_id, TIPS["🧘 Помощь"], reply_markup=MAIN_KB)
-        return
-
+    # 4. Дневник
     if text == "📓 Дневник":
-        db_query("UPDATE users SET state = 'gratitude' WHERE user_id = ?", (user_id,))
+        db_query("UPDATE users SET state = 'gratitude' WHERE user_id = ?", (user_id,), False)
         await bot.send_message(user_id, "Что хорошего случилось сегодня? ✨")
         return
 
     if state == "gratitude":
         db_query("INSERT INTO gratitude VALUES (?, ?, ?)", (user_id, text, str(datetime.date.today())), False)
-        db_query("UPDATE users SET state = 'idle' WHERE user_id = ?", (user_id,))
-        await bot.send_message(user_id, "Сохранила в твой дневник! 📔", reply_markup=MAIN_KB)
+        db_query("UPDATE users SET state = 'idle' WHERE user_id = ?", (user_id,), False)
+        await bot.send_message(user_id, "Записала в твой дневник! 📔", reply_markup=MAIN_KB)
         return
 
     # 5. Реактивный AI Чат
@@ -109,22 +96,25 @@ async def handle_update(update: Update):
         
         messages = [{"role": "system", "content": f"Ты KiKi, психолог. Собеседник: {name}. Отвечай мгновенно, тепло и вникай в каждое слово 🌿."}] + history + [{"role": "user", "content": text}]
         
-        ans = giga.chat({"messages": messages}).choices[0].message.content
+        # Исправленный вызов GigaChat
+        response = giga.chat({"messages": messages})
+        ans = response.choices[0].message.content
         
         db_query("INSERT INTO memory VALUES (?, 'user', ?, ?)", (user_id, text, datetime.datetime.now()), False)
         db_query("INSERT INTO memory VALUES (?, 'assistant', ?, ?)", (user_id, ans, datetime.datetime.now()), False)
         await bot.send_message(user_id, ans, reply_markup=MAIN_KB)
     except Exception as e:
         print(f"AI Error: {e}")
-        await bot.send_message(user_id, "Я рядом. Что у тебя на душе? ✨", reply_markup=MAIN_KB)
+        await bot.send_message(user_id, "Я рядом. ✨ Что на душе?", reply_markup=MAIN_KB)
 
 # =========================
 # 🌐 WEBHOOK
 # =========================
 @app.route("/webhook", methods=["POST"])
-async def webhook():
-    update = Update.de_json(request.get_json(force=True), bot)
-    await handle_update(update)
+def webhook():
+    data = request.get_json(force=True)
+    # Используем поток для обхода блокировок Render
+    threading.Thread(target=lambda: asyncio.run(handle_update(Update.de_json(data, bot)))).start()
     return "ok", 200
 
 if __name__ == "__main__":
