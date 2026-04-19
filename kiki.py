@@ -10,6 +10,7 @@ GIGA_KEY = os.getenv("GIGACHAT_CREDENTIALS")
 bot = Bot(token=TOKEN)
 app = Flask(__name__)
 
+# Клиент GigaChat (глобальный для скорости)
 giga = GigaChat(credentials=GIGA_KEY, verify_ssl_certs=False, scope="GIGACHAT_API_PERS")
 
 user_queues = {}
@@ -17,7 +18,7 @@ queue_lock = threading.Lock()
 
 # --- БАЗА ДАННЫХ ---
 def db_query(sql, params=(), is_select=True):
-    with sqlite3.connect("kiki.db", check_same_thread=False, timeout=60) as conn:
+    with sqlite3.connect("kiki.db", check_same_thread=False, timeout=30) as conn:
         cursor = conn.execute(sql, params)
         res = cursor.fetchall()
         conn.commit()
@@ -28,17 +29,16 @@ def init_db():
         conn.execute("CREATE TABLE IF NOT EXISTS users (user_id INTEGER PRIMARY KEY, name TEXT, state TEXT DEFAULT 'idle', test_step INTEGER DEFAULT 0, test_score INTEGER DEFAULT 0)")
         conn.execute("CREATE TABLE IF NOT EXISTS memory (user_id INTEGER, role TEXT, content TEXT, timestamp DATETIME)")
         conn.execute("CREATE TABLE IF NOT EXISTS results (user_id INTEGER, score INTEGER, date TEXT)")
-        conn.execute("CREATE TABLE IF NOT EXISTS processed_updates (update_id INTEGER PRIMARY KEY)")
 init_db()
 
-# --- AI ЛОГИКА (Женский род + Поддержка) ---
+# --- AI ЛОГИКА ---
 async def ask_ai(user_id, text, name, mode="chat"):
     try:
-        prefix = "Ты KiKi, эмпатичная девушка. "
+        prefix = "Ты KiKi, добрая девушка-психолог. "
         if mode == "help":
-            sys_prompt = f"{prefix} Пользователь {name} нажал кнопку ПОМОЩЬ. Скажи что-то очень теплое, поддерживающее, чтобы он не чувствовал себя одиноко, и предложи выбрать практику ниже 🌿."
+            sys_prompt = f"{prefix} Пользователь {name} просит помощи. Поддержи его очень тепло и предложи практики ниже 🌿."
         else:
-            sys_prompt = f"{prefix} Собеседник: {name}. Говори СТРОГО в женском роде. Будь ласковой и живой. 🌿"
+            sys_prompt = f"{prefix} Собеседник: {name}. Говори СТРОГО в женском роде, будь эмпатичной и краткой 🌿."
         
         hist_raw = db_query("SELECT role, content FROM memory WHERE user_id = ? ORDER BY timestamp DESC LIMIT 5", (user_id,))
         history = [{"role": r, "content": c} for r, c in reversed(hist_raw)]
@@ -49,20 +49,20 @@ async def ask_ai(user_id, text, name, mode="chat"):
         db_query("INSERT INTO memory VALUES (?, 'user', ?, ?)", (user_id, text, datetime.datetime.now()), False)
         db_query("INSERT INTO memory VALUES (?, 'assistant', ?, ?)", (user_id, ans, datetime.datetime.now()), False)
         return ans
-    except:
-        return "Я рядом, {name}. Ты не один. ✨"
+    except Exception as e:
+        print(f"AI Error: {e}")
+        return f"Я здесь, {name}. Ты не один. ✨ О чем хочешь поговорить?"
 
 # --- КОНТЕНТ ---
 MAIN_KB = ReplyKeyboardMarkup([["🧠 Тест", "💬 AI"], ["📊 Аналитика", "🧘 Помощь"]], resize_keyboard=True)
-TIPS_KB = ReplyKeyboardMarkup([["🆘 Тревога", "🌬️ Дыхание"], ["💡 Совет дня", "↩️ Назад"]], resize_keyboard=True)
+TIPS_KB = ReplyKeyboardMarkup([["🆘 Тревога", "🌬️ Дыхание"], ["↩️ Назад"]], resize_keyboard=True)
 TIPS = {
-    "🆘 Тревога": "Милая, давай заземлимся. Техника 5-4-3-2-1: назови 5 предметов вокруг... Я мысленно с тобой. ✨",
-    "🌬️ Дыхание": "Давай подышим вместе? Вдох на 4 счета, задержка на 4, выдох на 4... У тебя отлично получается. 🌿",
-    "💡 Совет дня": "Попробуй отложить телефон на 15 минут. Это время — только для тебя и твоей тишины. Я буду ждать тебя здесь. 📱❌"
+    "🆘 Тревога": "Техника 5-4-3-2-1: назови 5 предметов, которые видишь... Я рядом. ✨",
+    "🌬️ Дыхание": "Давай подышим вместе? Вдох на 4 счета, задержка на 4, выдох на 4... У тебя все получится. 🌿"
 }
-TEST_QS = ["Как твоя энергия? (1-5)", "Уровень тревоги? (1-5)", "Качество сна? (1-5)", "Время на отдых? (1-5)"]
+TEST_QS = ["Как твоя энергия сегодня? (1-5)", "Уровень тревоги? (1-5)", "Качество сна? (1-5)", "Время на отдых? (1-5)"]
 
-# --- WORKER ---
+# --- WORKER (Очередь) ---
 def worker(user_id, name):
     q = user_queues[user_id]
     loop = asyncio.new_event_loop()
@@ -75,61 +75,57 @@ def worker(user_id, name):
         q.task_done()
     with queue_lock: user_queues.pop(user_id, None)
 
-# --- ГЛАВНАЯ ЛОГИКА ---
+# --- ОБРАБОТКА ---
 async def handle_update(update: Update):
     if not update.message or not update.message.text: return
-    text, user_id, up_id = update.message.text, update.message.from_user.id, update.update_id
+    text, user_id = update.message.text, update.message.from_user.id
     
-    if db_query("SELECT update_id FROM processed_updates WHERE update_id = ?", (up_id,)): return
-    db_query("INSERT INTO processed_updates VALUES (?)", (up_id,), False)
+    u_data = db_query("SELECT name, state, test_step, test_score FROM users WHERE user_id = ?", (user_id,))
+    name, state, step, score = u_data[0] if u_data else ("друг", "idle", 0, 0)
 
-    res = db_query("SELECT name, state, test_step, test_score FROM users WHERE user_id = ?", (user_id,))
-    name, state, step, score = res[0] if res else ("друг", "idle", 0, 0)
-
+    # 1. Регистрация
     if text in ["/start", "/name"]:
         db_query("INSERT OR REPLACE INTO users (user_id, name, state) VALUES (?, ?, 'naming')", (user_id, name), False)
         await bot.send_message(user_id, "Привет! Я KiKi 🌿 Как мне к тебе обращаться?")
         return
 
     if state == "naming":
-        db_query("UPDATE users SET name = ?, state = 'idle' WHERE user_id = ?", (text[:15], user_id), False)
-        await bot.send_message(user_id, f"Рада знакомству, {text[:15]}! 😊", reply_markup=MAIN_KB)
+        name = text.strip()[:15]
+        db_query("UPDATE users SET name = ?, state = 'idle' WHERE user_id = ?", (name, user_id), False)
+        await bot.send_message(user_id, f"Рада знакомству, {name}! 😊", reply_markup=MAIN_KB)
         return
 
-    # ПОМОЩЬ (Грамотная и теплая)
-    if text == "🧘 Помощь":
-        await bot.send_chat_action(user_id, "typing")
-        ai_support = await ask_ai(user_id, "Мне нужна помощь", name, mode="help")
-        await bot.send_message(user_id, ai_support, reply_markup=TIPS_KB)
-        return
-
-    if text == "↩️ Назад":
-        await bot.send_message(user_id, "Я здесь, возвращаемся в меню. 🌿", reply_markup=MAIN_KB)
-        return
-
-    if text in TIPS:
-        await bot.send_message(user_id, TIPS[text], reply_markup=TIPS_KB)
-        return
-
-    # ТЕСТ (По одному вопросу)
+    # 2. Функции
     if text == "🧠 Тест" or state == "testing":
         if text == "🧠 Тест":
             db_query("UPDATE users SET state = 'testing', test_step = 0, test_score = 0 WHERE user_id = ?", (user_id,), False)
             await bot.send_message(user_id, TEST_QS[0], reply_markup=ReplyKeyboardMarkup([["1","2","3","4","5"]], resize_keyboard=True))
         else:
             val = int(text) if text.isdigit() else 3
-            new_step = step + 1
-            if new_step < len(TEST_QS):
-                db_query("UPDATE users SET test_step = ?, test_score = ? WHERE user_id = ?", (new_step, score + val, user_id), False)
-                await bot.send_message(user_id, TEST_QS[new_step])
+            if step + 1 < len(TEST_QS):
+                db_query("UPDATE users SET test_step = ?, test_score = ? WHERE user_id = ?", (step+1, score+val, user_id), False)
+                await bot.send_message(user_id, TEST_QS[step+1])
             else:
-                final = int(((score + val) / 20) * 100)
+                final = int(((score+val)/20)*100)
                 db_query("UPDATE users SET state = 'idle' WHERE user_id = ?", (user_id,), False)
                 db_query("INSERT INTO results VALUES (?, ?, ?)", (user_id, final, str(datetime.date.today())), False)
-                await bot.send_message(user_id, f"Мы закончили! Твой индекс: {final}% ✨ Я очень рада, что ты заботишься о себе.", reply_markup=MAIN_KB)
+                await bot.send_message(user_id, f"Мы закончили! Индекс благополучия: {final}% ✨", reply_markup=MAIN_KB)
         return
 
-    # AI Чат (Очередь)
+    if text == "🧘 Помощь":
+        ai_support = await ask_ai(user_id, "Мне нужна помощь", name, mode="help")
+        await bot.send_message(user_id, ai_support, reply_markup=TIPS_KB)
+        return
+
+    if text in TIPS:
+        await bot.send_message(user_id, TIPS[text], reply_markup=TIPS_KB)
+        return
+
+    if text == "↩️ Назад":
+        await bot.send_message(user_id, "Я рядом 🌿", reply_markup=MAIN_KB)
+        return
+
+    # 3. AI Чат (Очередь)
     with queue_lock:
         if user_id not in user_queues:
             user_queues[user_id] = queue.Queue()
