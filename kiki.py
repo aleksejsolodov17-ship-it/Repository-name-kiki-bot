@@ -32,28 +32,33 @@ def init_db():
 init_db()
 
 def save_memory(user_id, role, content):
-    with sqlite3.connect("kiki.db") as conn:
-        conn.execute("INSERT INTO memory VALUES (?, ?, ?, ?)", (user_id, role, content, datetime.datetime.now()))
-        # Удаляем старые сообщения, оставляя только последние 8 для контекста
-        conn.execute("DELETE FROM memory WHERE user_id = ? AND rowid NOT IN (SELECT rowid FROM memory WHERE user_id = ? ORDER BY timestamp DESC LIMIT 8)", (user_id, user_id))
+    try:
+        with sqlite3.connect("kiki.db") as conn:
+            conn.execute("INSERT INTO memory VALUES (?, ?, ?, ?)", (user_id, role, content, datetime.datetime.now()))
+            conn.execute("DELETE FROM memory WHERE user_id = ? AND rowid NOT IN (SELECT rowid FROM memory WHERE user_id = ? ORDER BY timestamp DESC LIMIT 10)", (user_id, user_id))
+    except Exception as e:
+        print(f"Ошибка БД (память): {e}")
 
 # =========================
 # 🧠 МОЗГ GIGACHAT
 # =========================
 def ask_ai(user_id, text):
+    # Получаем имя
     with sqlite3.connect("kiki.db") as conn:
-        user_data = conn.execute("SELECT name FROM users WHERE user_id = ?", (user_id,)).fetchone()
-    name = user_data[0] if user_data else "друг"
+        res = conn.execute("SELECT name FROM users WHERE user_id = ?", (user_id,)).fetchone()
+    name = res[0] if res else "друг"
     
     try:
+        # Явное создание клиента для каждого запроса (надежнее для Render)
         with GigaChat(credentials=GIGA_KEY, verify_ssl_certs=False, scope="GIGACHAT_API_PERS") as giga:
-            sys_msg = f"Ты KiKi — теплый ИИ-психолог. Пользователя зовут {name}. Отвечай кратко, эмпатично, используй эмодзи 🌿."
+            sys_msg = f"Ты KiKi — теплый ИИ-психолог. Пользователя зовут {name}. Отвечай кратко, эмпатично, используй 🌿."
             
             with sqlite3.connect("kiki.db") as conn:
                 rows = conn.execute("SELECT role, content FROM memory WHERE user_id = ? ORDER BY timestamp ASC", (user_id,)).fetchall()
                 history = [{"role": r, "content": c} for r, c in rows]
             
             messages = [{"role": "system", "content": sys_msg}] + history + [{"role": "user", "content": text}]
+            
             response = giga.chat({"messages": messages})
             ans = response.choices[0].message.content
             
@@ -61,35 +66,39 @@ def ask_ai(user_id, text):
             save_memory(user_id, "assistant", ans)
             return ans
     except Exception as e:
-        print(f"Ошибка ИИ: {e}")
+        print(f"!!! ОШИБКА GIGACHAT: {e}")
         return "Я здесь, просто настраиваюсь на твою волну... ✨ О чем хочешь поговорить?"
 
 # =========================
 # 📈 ГРАФИКА
 # =========================
 def create_trend_chart(user_id):
-    with sqlite3.connect("kiki.db") as conn:
-        res = conn.execute("SELECT theme FROM users WHERE user_id = ?", (user_id,)).fetchone()
-        theme = res[0] if res else 'light'
-        data = conn.execute("SELECT date, score FROM results WHERE user_id = ? ORDER BY date ASC LIMIT 10", (user_id,)).fetchall()
-    
-    if not data: return None
-    dates, scores = [d[0][-5:] for d in data], [s[1] for s in data]
-    
-    plt.figure(figsize=(8, 4))
-    plt.style.use('dark_background' if theme == 'dark' else 'default')
-    color = '#a8e6cf' if theme == 'dark' else '#7eb5a6'
-    
-    plt.plot(dates, scores, marker='o', color=color, linewidth=3)
-    plt.fill_between(dates, scores, color=color, alpha=0.2)
-    plt.ylim(0, 105)
-    plt.title("Твоя ментальная кривая 🌿", color=color)
-    
-    buf = io.BytesIO()
-    plt.savefig(buf, format='png', bbox_inches='tight')
-    buf.seek(0)
-    plt.close()
-    return buf
+    try:
+        with sqlite3.connect("kiki.db") as conn:
+            res = conn.execute("SELECT theme FROM users WHERE user_id = ?", (user_id,)).fetchone()
+            theme = res[0] if res else 'light'
+            data = conn.execute("SELECT date, score FROM results WHERE user_id = ? ORDER BY date ASC LIMIT 10", (user_id,)).fetchall()
+        
+        if not data: return None
+        dates, scores = [d[0][-5:] for d in data], [s[1] for s in data]
+        
+        plt.figure(figsize=(8, 4))
+        plt.style.use('dark_background' if theme == 'dark' else 'default')
+        color = '#a8e6cf' if theme == 'dark' else '#7eb5a6'
+        
+        plt.plot(dates, scores, marker='o', color=color, linewidth=3)
+        plt.fill_between(dates, scores, color=color, alpha=0.2)
+        plt.ylim(0, 105)
+        plt.title("Твоя ментальная кривая 🌿", color=color)
+        
+        buf = io.BytesIO()
+        plt.savefig(buf, format='png', bbox_inches='tight')
+        buf.seek(0)
+        plt.close()
+        return buf
+    except Exception as e:
+        print(f"Ошибка графика: {e}")
+        return None
 
 # =========================
 # 🎮 ЛОГИКА БОТА
@@ -120,7 +129,7 @@ async def process_update(update: Update):
         await bot.send_message(user_id, "Ой, я что-то напутала! Как твое настоящее имя? ✨")
         return
 
-    # 2. Приоритет: Состояния (ввод данных)
+    # 2. Приоритет: Состояния
     if user_id in user_state:
         state = user_state[user_id].get("step")
         
@@ -194,8 +203,11 @@ scheduler.start()
 # =========================
 @app.route("/webhook", methods=["POST"])
 def webhook():
-    update = Update.de_json(request.get_json(force=True), bot)
-    threading.Thread(target=lambda: asyncio.run(process_update(update))).start()
+    try:
+        update = Update.de_json(request.get_json(force=True), bot)
+        threading.Thread(target=lambda: asyncio.run(process_update(update))).start()
+    except Exception as e:
+        print(f"Ошибка вебхука: {e}")
     return "ok", 200
 
 if __name__ == "__main__":
