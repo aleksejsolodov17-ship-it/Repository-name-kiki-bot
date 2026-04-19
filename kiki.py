@@ -18,101 +18,72 @@ def db_query(sql, params=(), is_select=True):
         conn.commit()
         return res if is_select else None
 
-# Инициализация
+# Инициализация БД
 with sqlite3.connect("kiki.db") as conn:
     conn.execute("CREATE TABLE IF NOT EXISTS users (user_id INTEGER PRIMARY KEY, name TEXT, state TEXT DEFAULT 'idle', test_step INTEGER DEFAULT 0, test_score INTEGER DEFAULT 0)")
     conn.execute("CREATE TABLE IF NOT EXISTS memory (user_id INTEGER, role TEXT, content TEXT, timestamp DATETIME)")
     conn.execute("CREATE TABLE IF NOT EXISTS results (user_id INTEGER, score INTEGER, date TEXT)")
 
-# --- AI ЛОГИКА ---
+# --- УЛУЧШЕННАЯ AI ЛОГИКА ---
 def ask_ai(user_id, text, name, mode="chat"):
     try:
         with GigaChat(credentials=GIGA_KEY, verify_ssl_certs=False, scope="GIGACHAT_API_PERS") as giga:
-            if mode == "help":
-                sys_prompt = f"Ты KiKi, эмпатичная девушка. {name} просит помощи. Скажи что-то очень теплое и поддерживающее, чтобы он почувствовал, что не одинок 🌿."
-            else:
-                sys_prompt = f"Ты KiKi — нежная девушка-психолог. Твой друг: {name}. Говори СТРОГО в женском роде, отвечай тепло и кратко 🌿."
+            # УСТАНОВКА: Имя + Пол + Внимательность
+            sys_prompt = f"Ты KiKi — нежная девушка-психолог. Твой единственный и лучший друг — {name}. Говори СТРОГО в женском роде. Внимательно читай всё, что он пишет, и отвечай на все вопросы. Будь очень теплой 🌿."
             
-            rows = db_query("SELECT role, content FROM memory WHERE user_id = ? ORDER BY timestamp DESC LIMIT 3", (user_id,))
+            if mode == "help": 
+                sys_prompt += f" Сейчас {name} просит помощи, поддержи его."
+
+            # Загружаем историю (чуть больше для контекста)
+            rows = db_query("SELECT role, content FROM memory WHERE user_id = ? ORDER BY timestamp DESC LIMIT 4", (user_id,))
             history = [{"role": r, "content": c} for r, c in reversed(rows)]
+            
             messages = [{"role": "system", "content": sys_prompt}] + history + [{"role": "user", "content": text}]
             
             res = giga.chat({"messages": messages})
             ans = res.choices[0].message.content
             
+            # Сохраняем в память
             db_query("INSERT INTO memory VALUES (?, 'user', ?, ?)", (user_id, text, datetime.datetime.now()), False)
             db_query("INSERT INTO memory VALUES (?, 'assistant', ?, ?)", (user_id, ans, datetime.datetime.now()), False)
             return ans
-    except:
-        return f"Я рядом, {name}. ✨ Что бы ни случилось, ты не один."
+    except Exception as e:
+        print(f"AI ERROR: {e}")
+        return f"Я здесь, {name}. 🌿 Просто на мгновение задумалась о чем-то своем. Что ты хотел рассказать?"
 
-# --- ГРАФИКА ---
-def create_chart(user_id):
-    data = db_query("SELECT score, date FROM results WHERE user_id = ? ORDER BY date ASC LIMIT 10", (user_id,))
-    if not data: return None
-    scores = [d[0] for d in data]
-    dates = [d[1][-5:] for d in data]
-    plt.figure(figsize=(8, 4))
-    plt.plot(dates, scores, marker='o', color='#7eb5a6', linewidth=3)
-    plt.ylim(0, 105); plt.title("Твой ментальный путь 🌿")
-    buf = io.BytesIO(); plt.savefig(buf, format='png'); buf.seek(0); plt.close()
-    return buf
-
-# --- ОБРАБОТЧИК ---
+# --- ЛОГИКА БОТА ---
 MAIN_KB = ReplyKeyboardMarkup([["🧠 Тест", "💬 AI"], ["📊 Аналитика", "🧘 Помощь"]], resize_keyboard=True)
-TEST_QS = ["Как твоя энергия сегодня? (1-5)", "Уровень тревоги? (1-5)", "Качество сна? (1-5)", "Время на отдых? (1-5)"]
 
 async def handle_msg(update: Update):
     if not update.message or not update.message.text: return
     text, user_id = update.message.text, update.message.from_user.id
     
-    raw = db_query("SELECT name, state, test_step, test_score FROM users WHERE user_id = ?", (user_id,))
-    if raw:
-        name, state, step, score = raw[0]
-    else:
-        name, state, step, score = "друг", "idle", 0, 0
+    raw = db_query("SELECT name, state FROM users WHERE user_id = ?", (user_id,))
+    name, state = raw[0] if raw else ("друг", "idle")
 
-    # 1. Команды
+    # Регистрация и команды
     if "/start" in text or "/name" in text:
         db_query("INSERT OR REPLACE INTO users (user_id, name, state) VALUES (?, ?, 'naming')", (user_id, name), False)
         await bot.send_message(user_id, "Я проснулась! 🌿 Как мне к тебе обращаться?")
         return
 
     if state == "naming":
-        db_query("UPDATE users SET name = ?, state = 'idle' WHERE user_id = ?", (text[:15], user_id), False)
-        await bot.send_message(user_id, f"Рада знакомству, {text[:15]}! 😊", reply_markup=MAIN_KB)
+        new_name = text.strip()[:15]
+        db_query("UPDATE users SET name = ?, state = 'idle' WHERE user_id = ?", (new_name, user_id), False)
+        # Записываем знакомство в память ИИ
+        db_query("INSERT INTO memory VALUES (?, 'assistant', ?, ?)", (user_id, f"Рада знакомству, {new_name}!", datetime.datetime.now()), False)
+        await bot.send_message(user_id, f"Рада познакомиться, {new_name}! 😊 Чем займемся?", reply_markup=MAIN_KB)
         return
 
-    # 2. Функции (Мгновенный перехват)
-    if "Тест" in text or state == "testing":
-        if "Тест" in text:
-            db_query("UPDATE users SET state = 'testing', test_step = 0, test_score = 0 WHERE user_id = ?", (user_id,), False)
-            await bot.send_message(user_id, TEST_QS[0], reply_markup=ReplyKeyboardMarkup([["1","2","3","4","5"]], resize_keyboard=True))
-        else:
-            val = int(text) if text.isdigit() else 3
-            new_step = step + 1
-            if new_step < len(TEST_QS):
-                db_query("UPDATE users SET test_step = ?, test_score = ? WHERE user_id = ?", (new_step, score + val, user_id), False)
-                await bot.send_message(user_id, TEST_QS[new_step])
-            else:
-                final = int(((score + val) / 20) * 100)
-                db_query("UPDATE users SET state = 'idle', test_step = 0 WHERE user_id = ?", (user_id,), False)
-                db_query("INSERT INTO results VALUES (?, ?, ?)", (user_id, final, str(datetime.date.today())), False)
-                await bot.send_message(user_id, f"Мы закончили! ✨ Твой индекс: {final}%", reply_markup=MAIN_KB)
-        return
-
-    if "Аналитика" in text:
-        chart = create_chart(user_id)
-        if chart: await bot.send_photo(user_id, photo=chart, caption="Твой прогресс 📈")
-        else: await bot.send_message(user_id, "Данных пока нет. Пройди тест! 🧠")
-        return
-
+    # Перехват кнопок
     if "Помощь" in text:
         ans = ask_ai(user_id, "Мне нужна помощь", name, mode="help")
-        await bot.send_message(user_id, ans, reply_markup=MAIN_KB)
-        return
+        await bot.send_message(user_id, ans, reply_markup=MAIN_KB); return
 
-    # 3. AI Чат
+    if "Аналитика" in text:
+        await bot.send_message(user_id, f"{name}, я еще коплю данные, чтобы построить твой график. Давай пройдем тест? 📈", reply_markup=MAIN_KB); return
+
+    # Обычный чат
     await bot.send_chat_action(user_id, "typing")
     ans = ask_ai(user_id, text, name)
     await bot.send_message(user_id, ans, reply_markup=MAIN_KB)
@@ -120,7 +91,8 @@ async def handle_msg(update: Update):
 @app.route("/webhook", methods=["POST"])
 def webhook():
     data = request.get_json(force=True)
-    threading.Thread(target=lambda: asyncio.run(handle_msg(Update.de_json(data, bot)))).start()
+    if data:
+        threading.Thread(target=lambda: asyncio.run(handle_msg(Update.de_json(data, bot)))).start()
     return "ok", 200
 
 if __name__ == "__main__":
