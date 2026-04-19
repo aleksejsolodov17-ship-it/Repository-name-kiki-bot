@@ -48,14 +48,14 @@ def ask_ai(user_id, text, name, system_suffix=""):
             return ans
     except Exception as e:
         print(f"AI Error: {e}")
-        return "Я рядом, просто настраиваюсь на твою волну... ✨"
+        return "Я здесь, просто настраиваюсь на твою волну... ✨"
 
 # =========================
 # 📈 ГРАФИКА
 # =========================
 def create_chart(user_id):
-    user_data = db_query("SELECT theme FROM users WHERE user_id = ?", (user_id,), True)
-    theme = user_data[0][0] if user_data else 'light'
+    u_data = db_query("SELECT theme FROM users WHERE user_id = ?", (user_id,), True)
+    theme = u_data[0][0] if u_data else 'light'
     data = db_query("SELECT date, score FROM results WHERE user_id = ? ORDER BY date ASC LIMIT 10", (user_id,), True)
     
     if not data: return None
@@ -105,7 +105,7 @@ async def process_update(update: Update):
     # --- Навигация и Команды ---
     if text in ["/start", "/name", "↩️ Назад"]:
         db_query("INSERT OR REPLACE INTO users (user_id, name, state) VALUES (?, ?, 'naming')", (user_id, name))
-        await bot.send_message(user_id, f"Привет! Я KiKi 🌿 Как мне к тебе обращаться?", reply_markup=MAIN_KB if text=="↩️ Назад" else None)
+        await bot.send_message(user_id, "Привет! Я KiKi 🌿 Как мне к тебе обращаться?", reply_markup=None if text != "↩️ Назад" else MAIN_KB)
         return
 
     # --- Регистрация имени ---
@@ -113,7 +113,7 @@ async def process_update(update: Update):
         for w in ["Я", "Меня зовут"]: text = text.replace(w, "")
         clean_name = text.strip(" ,.!")
         db_query("UPDATE users SET name = ?, state = 'idle' WHERE user_id = ?", (clean_name, user_id))
-        await bot.send_message(user_id, f"Приятно познакомиться, {clean_name}! 😊 Выбирай, с чего начнем:", reply_markup=MAIN_KB)
+        await bot.send_message(user_id, f"Приятно познакомиться, {clean_name}! 😊 Все функции доступны в меню ниже.", reply_markup=MAIN_KB)
         return
 
     # --- Тест ---
@@ -134,24 +134,23 @@ async def process_update(update: Update):
             db_query("INSERT INTO results VALUES (?, ?, ?)", (user_id, final_score, str(datetime.date.today())))
             db_query("UPDATE users SET state = 'idle', test_step = 0 WHERE user_id = ?", (user_id,))
             
-            # Анализ ИИ
             await bot.send_chat_action(user_id, "typing")
-            analysis = ask_ai(user_id, f"Мой результат теста: {final_score}%. Проанализируй эмпатично.", name)
+            analysis = ask_ai(user_id, f"Мой результат теста: {final_score}%. Дай краткий совет.", name)
             await bot.send_message(user_id, f"📊 Твой уровень благополучия: {final_score}%\n\n{analysis}", reply_markup=MAIN_KB)
         return
 
     # --- Функции кнопок ---
     if text == "📊 Аналитика":
         chart = create_chart(user_id)
-        if chart: await bot.send_photo(user_id, photo=chart, caption="Твой прогресс за последнее время. Ты молодец! 📈")
-        else: await bot.send_message(user_id, "Данных пока нет. Пройди тест! 🧠")
+        if chart: await bot.send_photo(user_id, photo=chart, caption="Твой ментальный путь 📈", reply_markup=MAIN_KB)
+        else: await bot.send_message(user_id, "Данных пока нет. Пройди тест! 🧠", reply_markup=MAIN_KB)
         return
 
     if text == "🎨 Тема":
         curr = db_query("SELECT theme FROM users WHERE user_id = ?", (user_id,), True)
         new_t = 'dark' if (not curr or curr[0][0] == 'light') else 'light'
         db_query("UPDATE users SET theme = ? WHERE user_id = ?", (new_t, user_id))
-        await bot.send_message(user_id, f"Тема графиков изменена на {new_t}! 🎨")
+        await bot.send_message(user_id, f"Тема графиков изменена на {new_t}! 🎨", reply_markup=MAIN_KB)
         return
 
     if text == "🧘 Помощь":
@@ -159,7 +158,7 @@ async def process_update(update: Update):
         return
 
     if text in TIPS:
-        await bot.send_message(user_id, TIPS[text])
+        await bot.send_message(user_id, TIPS[text], reply_markup=TIPS_KB)
         return
 
     if text == "📓 Дневник":
@@ -170,29 +169,14 @@ async def process_update(update: Update):
     if state == "gratitude":
         db_query("INSERT INTO gratitude VALUES (?, ?, ?)", (user_id, text, str(datetime.date.today())))
         db_query("UPDATE users SET state = 'idle' WHERE user_id = ?", (user_id,))
-        ans = ask_ai(user_id, f"Я записал в дневник: {text}. Порадуйся за меня.", name)
+        ans = ask_ai(user_id, f"Я записал в дневник: {text}.", name)
         await bot.send_message(user_id, ans, reply_markup=MAIN_KB)
         return
 
     # --- AI Чат по умолчанию ---
     await bot.send_chat_action(user_id, "typing")
     ans = ask_ai(user_id, text, name)
-    await bot.send_message(user_id, ans)
-
-# =========================
-# ⏰ УВЕДОМЛЕНИЯ
-# =========================
-def morning_wish():
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    users = db_query("SELECT user_id, name FROM users", is_select=True)
-    for u in users:
-        try: loop.run_until_complete(bot.send_message(u[0], f"Доброе утро, {u[1]}! ✨ Как самочувствие сегодня?"))
-        except: pass
-
-scheduler = BackgroundScheduler()
-scheduler.add_job(morning_wish, 'cron', hour=9, minute=0)
-scheduler.start()
+    await bot.send_message(user_id, ans, reply_markup=MAIN_KB)
 
 # =========================
 # 🌐 WEBHOOK
