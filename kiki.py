@@ -5,17 +5,13 @@ from telegram import Bot, Update, ReplyKeyboardMarkup
 from gigachat import GigaChat
 from apscheduler.schedulers.background import BackgroundScheduler
 
-# =========================
-# 🔑 КОНФИГУРАЦИЯ
-# =========================
+# --- КОНФИГУРАЦИЯ ---
 TOKEN = os.getenv("TELEGRAM_TOKEN")
 GIGA_KEY = os.getenv("GIGACHAT_CREDENTIALS")
 bot = Bot(token=TOKEN)
 app = Flask(__name__)
 
-# =========================
-# 📊 БАЗА ДАННЫХ
-# =========================
+# --- ИНИЦИАЛИЗАЦИЯ БД ---
 def init_db():
     with sqlite3.connect("kiki.db", check_same_thread=False) as conn:
         conn.execute("CREATE TABLE IF NOT EXISTS users (user_id INTEGER PRIMARY KEY, name TEXT, state TEXT DEFAULT 'idle', test_step INTEGER DEFAULT 0, test_score INTEGER DEFAULT 0, theme TEXT DEFAULT 'light')")
@@ -27,16 +23,13 @@ init_db()
 def db_query(sql, params=(), is_select=False):
     with sqlite3.connect("kiki.db", check_same_thread=False) as conn:
         cursor = conn.execute(sql, params)
-        res = cursor.fetchall() if is_select else conn.commit()
-        return res
+        return cursor.fetchall() if is_select else conn.commit()
 
-# =========================
-# 🧠 МОЗГ GIGACHAT
-# =========================
-def ask_ai(user_id, text, name, system_suffix=""):
+# --- AI ЛОГИКА ---
+def ask_ai(user_id, text, name):
     try:
         with GigaChat(credentials=GIGA_KEY, verify_ssl_certs=False, scope="GIGACHAT_API_PERS") as giga:
-            sys_prompt = f"Ты KiKi — добрый ИИ-психолог. Пользователя зовут {name}. Отвечай тепло, коротко, используй 🌿. {system_suffix}"
+            sys_prompt = f"Ты KiKi — добрый ИИ-психолог. Пользователя зовут {name}. Отвечай тепло, коротко, по-русски 🌿."
             rows = db_query("SELECT role, content FROM memory WHERE user_id = ? ORDER BY timestamp DESC LIMIT 6", (user_id,), True)
             history = [{"role": r, "content": c} for r, c in reversed(rows)]
             
@@ -50,12 +43,10 @@ def ask_ai(user_id, text, name, system_suffix=""):
         print(f"AI Error: {e}")
         return "Я здесь, просто настраиваюсь на твою волну... ✨"
 
-# =========================
-# 📈 ГРАФИКА
-# =========================
+# --- ГРАФИКА ---
 def create_chart(user_id):
-    u_data = db_query("SELECT theme FROM users WHERE user_id = ?", (user_id,), True)
-    theme = u_data[0][0] if u_data else 'light'
+    u_res = db_query("SELECT theme FROM users WHERE user_id = ?", (user_id,), True)
+    theme = u_res[0][0] if u_res else 'light'
     data = db_query("SELECT date, score FROM results WHERE user_id = ? ORDER BY date ASC LIMIT 10", (user_id,), True)
     
     if not data: return None
@@ -64,123 +55,96 @@ def create_chart(user_id):
     plt.figure(figsize=(8, 4))
     plt.style.use('dark_background' if theme == 'dark' else 'default')
     color = '#a8e6cf' if theme == 'dark' else '#7eb5a6'
-    
     plt.plot(dates, scores, marker='o', color=color, linewidth=3)
     plt.fill_between(dates, scores, color=color, alpha=0.2)
-    plt.ylim(0, 105)
-    plt.title("Твой ментальный путь 🌿", color=color)
-    
-    buf = io.BytesIO(); plt.savefig(buf, format='png', bbox_inches='tight'); buf.seek(0); plt.close()
+    plt.ylim(0, 105); plt.title("Твой путь 🌿", color=color)
+    buf = io.BytesIO(); plt.savefig(buf, format='png'); buf.seek(0); plt.close()
     return buf
 
-# =========================
-# 🎮 КОНТЕНТ И КЛАВИАТУРЫ
-# =========================
+# --- КОНТЕНТ ---
 MAIN_KB = ReplyKeyboardMarkup([["🧠 Тест", "💬 AI"], ["📓 Дневник", "📊 Аналитика"], ["🎨 Тема", "🧘 Помощь"]], resize_keyboard=True)
 TIPS_KB = ReplyKeyboardMarkup([["🆘 Тревога", "🌬️ Дыхание"], ["💡 Совет дня", "↩️ Назад"]], resize_keyboard=True)
+TIPS = {"🆘 Тревога": "Техника 5-4-3-2-1 заземляет. ✨", "🌬️ Дыхание": "Вдох на 4, задержка 4, выдох 8. 🌿"}
+TEST_QUESTIONS = ["Как твоя энергия сегодня? (1-5)", "Уровень тревоги? (1-5)", "Как спалось? (1-5)", "Время на отдых было? (1-5)"]
 
-TIPS = {
-    "🆘 Тревога": "Техника 5-4-3-2-1: назови 5 предметов, которые видишь, 4, которые можешь потрогать, 3 звука, 2 запаха и 1 вкус. ✨",
-    "🌬️ Дыхание": "Вдох на 4 счета, задержка на 4, выдох на 8. Это успокоит нервную систему. 🌿",
-    "💡 Совет дня": "Попробуй сегодня практику 'Цифровой тишины': 15 минут без уведомлений и экранов. 📱❌"
-}
-
-TEST_QUESTIONS = [
-    "Как ты оценишь свой уровень энергии сегодня? (1-5)",
-    "Часто ли ты чувствуешь тревогу на этой неделе? (1-5)",
-    "Удается ли тебе находить время на отдых? (1-5)",
-    "Как ты оценишь качество своего сна? (1-5)"
-]
-
-# =========================
-# 🕹️ ЛОГИКА ОБРАБОТКИ
-# =========================
+# --- ГЛАВНАЯ ЛОГИКА ---
 async def process_update(update: Update):
     if not update.message or not update.message.text: return
     text, user_id = update.message.text, update.message.from_user.id
     
-    u_data = db_query("SELECT name, state, test_step, test_score FROM users WHERE user_id = ?", (user_id,), True)
-    name, state, step, score = u_data[0] if u_data else ("друг", "idle", 0, 0)
+    raw = db_query("SELECT name, state, test_step, test_score FROM users WHERE user_id = ?", (user_id,), True)
+    name, state, step, score = raw[0] if raw else ("друг", "idle", 0, 0)
 
-    # --- Навигация и Команды ---
-    if text in ["/start", "/name", "↩️ Назад"]:
+    if text == "/start" or text == "/name":
         db_query("INSERT OR REPLACE INTO users (user_id, name, state) VALUES (?, ?, 'naming')", (user_id, name))
-        await bot.send_message(user_id, "Привет! Я KiKi 🌿 Как мне к тебе обращаться?", reply_markup=None if text != "↩️ Назад" else MAIN_KB)
+        await bot.send_message(user_id, "Привет! Я KiKi 🌿 Как мне к тебе обращаться?")
         return
 
-    # --- Регистрация имени ---
     if state == "naming":
-        for w in ["Я", "Меня зовут"]: text = text.replace(w, "")
-        clean_name = text.strip(" ,.!")
-        db_query("UPDATE users SET name = ?, state = 'idle' WHERE user_id = ?", (clean_name, user_id))
-        await bot.send_message(user_id, f"Приятно познакомиться, {clean_name}! 😊 Все функции доступны в меню ниже.", reply_markup=MAIN_KB)
+        name = text.replace("Я", "").replace("зовут", "").strip(" ,.!")
+        db_query("UPDATE users SET name = ?, state = 'idle' WHERE user_id = ?", (name, user_id))
+        await bot.send_message(user_id, f"Приятно познакомиться, {name}! 😊", reply_markup=MAIN_KB)
         return
 
-    # --- Тест ---
-    if text == "🧠 Тест" or state == "testing":
-        if text == "🧠 Тест":
-            step, score = 0, 0
-            db_query("UPDATE users SET state = 'testing', test_step = 0, test_score = 0 WHERE user_id = ?", (user_id,))
-        else:
-            val = int(text) if text.isdigit() else 3
-            score += val
-            step += 1
-        
-        if step < len(TEST_QUESTIONS):
-            db_query("UPDATE users SET test_step = ?, test_score = ? WHERE user_id = ?", (step, score, user_id))
-            await bot.send_message(user_id, TEST_QUESTIONS[step], reply_markup=ReplyKeyboardMarkup([["1","2","3","4","5"]], resize_keyboard=True))
-        else:
-            final_score = int((score / (len(TEST_QUESTIONS)*5)) * 100)
-            db_query("INSERT INTO results VALUES (?, ?, ?)", (user_id, final_score, str(datetime.date.today())))
-            db_query("UPDATE users SET state = 'idle', test_step = 0 WHERE user_id = ?", (user_id,))
-            
-            await bot.send_chat_action(user_id, "typing")
-            analysis = ask_ai(user_id, f"Мой результат теста: {final_score}%. Дай краткий совет.", name)
-            await bot.send_message(user_id, f"📊 Твой уровень благополучия: {final_score}%\n\n{analysis}", reply_markup=MAIN_KB)
+    if text == "🧠 Тест":
+        db_query("UPDATE users SET state = 'testing', test_step = 0, test_score = 0 WHERE user_id = ?", (user_id,))
+        await bot.send_message(user_id, TEST_QUESTIONS[0], reply_markup=ReplyKeyboardMarkup([["1","2","3","4","5"]], resize_keyboard=True))
         return
 
-    # --- Функции кнопок ---
+    if state == "testing":
+        val = int(text) if text.isdigit() else 3
+        new_score, new_step = score + val, step + 1
+        if new_step < len(TEST_QUESTIONS):
+            db_query("UPDATE users SET test_step = ?, test_score = ? WHERE user_id = ?", (new_step, new_score, user_id))
+            await bot.send_message(user_id, TEST_QUESTIONS[new_step])
+        else:
+            final = int((new_score / (len(TEST_QUESTIONS)*5)) * 100)
+            db_query("INSERT INTO results VALUES (?, ?, ?)", (user_id, final, str(datetime.date.today())))
+            db_query("UPDATE users SET state = 'idle' WHERE user_id = ?", (user_id,))
+            await bot.send_message(user_id, f"Твой индекс: {final}% ✨", reply_markup=MAIN_KB)
+        return
+
     if text == "📊 Аналитика":
         chart = create_chart(user_id)
-        if chart: await bot.send_photo(user_id, photo=chart, caption="Твой ментальный путь 📈", reply_markup=MAIN_KB)
-        else: await bot.send_message(user_id, "Данных пока нет. Пройди тест! 🧠", reply_markup=MAIN_KB)
+        if chart: await bot.send_photo(user_id, photo=chart, caption="Твой прогресс 📈")
+        else: await bot.send_message(user_id, "Пройди тест!")
         return
 
     if text == "🎨 Тема":
-        curr = db_query("SELECT theme FROM users WHERE user_id = ?", (user_id,), True)
-        new_t = 'dark' if (not curr or curr[0][0] == 'light') else 'light'
+        res = db_query("SELECT theme FROM users WHERE user_id = ?", (user_id,), True)
+        new_t = 'dark' if (not res or res[0][0] == 'light') else 'light'
         db_query("UPDATE users SET theme = ? WHERE user_id = ?", (new_t, user_id))
-        await bot.send_message(user_id, f"Тема графиков изменена на {new_t}! 🎨", reply_markup=MAIN_KB)
+        await bot.send_message(user_id, f"Тема: {new_t} 🎨")
         return
 
     if text == "🧘 Помощь":
-        await bot.send_message(user_id, "Я подготовила практики самопомощи:", reply_markup=TIPS_KB)
+        await bot.send_message(user_id, "SOS-практики:", reply_markup=TIPS_KB)
         return
 
     if text in TIPS:
-        await bot.send_message(user_id, TIPS[text], reply_markup=TIPS_KB)
+        await bot.send_message(user_id, TIPS[text])
+        return
+
+    if text == "↩️ Назад":
+        await bot.send_message(user_id, "Главное меню", reply_markup=MAIN_KB)
         return
 
     if text == "📓 Дневник":
         db_query("UPDATE users SET state = 'gratitude' WHERE user_id = ?", (user_id,))
-        await bot.send_message(user_id, "Напиши, что хорошего случилось сегодня? ✨")
+        await bot.send_message(user_id, "Что хорошего случилось?")
         return
 
     if state == "gratitude":
         db_query("INSERT INTO gratitude VALUES (?, ?, ?)", (user_id, text, str(datetime.date.today())))
         db_query("UPDATE users SET state = 'idle' WHERE user_id = ?", (user_id,))
-        ans = ask_ai(user_id, f"Я записал в дневник: {text}.", name)
-        await bot.send_message(user_id, ans, reply_markup=MAIN_KB)
+        await bot.send_message(user_id, "Сохранила! ✨", reply_markup=MAIN_KB)
         return
 
-    # --- AI Чат по умолчанию ---
+    # AI CHAT
     await bot.send_chat_action(user_id, "typing")
     ans = ask_ai(user_id, text, name)
     await bot.send_message(user_id, ans, reply_markup=MAIN_KB)
 
-# =========================
-# 🌐 WEBHOOK
-# =========================
 @app.route("/webhook", methods=["POST"])
 def webhook():
     data = request.get_json(force=True)
