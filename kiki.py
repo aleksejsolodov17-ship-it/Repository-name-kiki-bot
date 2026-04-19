@@ -25,23 +25,26 @@ with sqlite3.connect("kiki.db") as conn:
     conn.execute("CREATE TABLE IF NOT EXISTS results (user_id INTEGER, score INTEGER, date TEXT)")
 
 # --- AI ЛОГИКА ---
-def ask_ai(user_id, text, name):
+def ask_ai(user_id, text, name, mode="chat"):
     try:
         with GigaChat(credentials=GIGA_KEY, verify_ssl_certs=False, scope="GIGACHAT_API_PERS") as giga:
-            sys_prompt = f"Ты KiKi — нежная девушка-психолог. Твой друг: {name}. Говори СТРОГО в женском роде, будь эмпатичной и краткой 🌿."
+            if mode == "help":
+                sys_prompt = f"Ты KiKi, эмпатичная девушка. {name} просит помощи. Скажи что-то очень теплое и поддерживающее, чтобы он почувствовал, что не одинок 🌿."
+            else:
+                sys_prompt = f"Ты KiKi — нежная девушка-психолог. Твой друг: {name}. Говори СТРОГО в женском роде, отвечай тепло и кратко 🌿."
+            
             rows = db_query("SELECT role, content FROM memory WHERE user_id = ? ORDER BY timestamp DESC LIMIT 3", (user_id,))
             history = [{"role": r, "content": c} for r, c in reversed(rows)]
             messages = [{"role": "system", "content": sys_prompt}] + history + [{"role": "user", "content": text}]
             
             res = giga.chat({"messages": messages})
-            ans = res.choices[0].message.content # Добавлен индекс [0]
+            ans = res.choices[0].message.content
             
             db_query("INSERT INTO memory VALUES (?, 'user', ?, ?)", (user_id, text, datetime.datetime.now()), False)
             db_query("INSERT INTO memory VALUES (?, 'assistant', ?, ?)", (user_id, ans, datetime.datetime.now()), False)
             return ans
-    except Exception as e:
-        print(f"AI ERROR: {e}")
-        return "Я рядом. ✨ Просто на мгновение задумалась о чем-то важном..."
+    except:
+        return f"Я рядом, {name}. ✨ Что бы ни случилось, ты не один."
 
 # --- ГРАФИКА ---
 def create_chart(user_id):
@@ -64,9 +67,12 @@ async def handle_msg(update: Update):
     text, user_id = update.message.text, update.message.from_user.id
     
     raw = db_query("SELECT name, state, test_step, test_score FROM users WHERE user_id = ?", (user_id,))
-    name, state, step, score = raw[0] if raw else ("друг", "idle", 0, 0)
+    if raw:
+        name, state, step, score = raw[0]
+    else:
+        name, state, step, score = "друг", "idle", 0, 0
 
-    # 1. Приоритет: Кнопки и команды (срабатывают мгновенно)
+    # 1. Команды
     if "/start" in text or "/name" in text:
         db_query("INSERT OR REPLACE INTO users (user_id, name, state) VALUES (?, ?, 'naming')", (user_id, name), False)
         await bot.send_message(user_id, "Я проснулась! 🌿 Как мне к тебе обращаться?")
@@ -74,9 +80,10 @@ async def handle_msg(update: Update):
 
     if state == "naming":
         db_query("UPDATE users SET name = ?, state = 'idle' WHERE user_id = ?", (text[:15], user_id), False)
-        await bot.send_message(user_id, f"Рада знакомству, {text[:15]}! 😊 Чем займемся?", reply_markup=MAIN_KB)
+        await bot.send_message(user_id, f"Рада знакомству, {text[:15]}! 😊", reply_markup=MAIN_KB)
         return
 
+    # 2. Функции (Мгновенный перехват)
     if "Тест" in text or state == "testing":
         if "Тест" in text:
             db_query("UPDATE users SET state = 'testing', test_step = 0, test_score = 0 WHERE user_id = ?", (user_id,), False)
@@ -91,7 +98,7 @@ async def handle_msg(update: Update):
                 final = int(((score + val) / 20) * 100)
                 db_query("UPDATE users SET state = 'idle', test_step = 0 WHERE user_id = ?", (user_id,), False)
                 db_query("INSERT INTO results VALUES (?, ?, ?)", (user_id, final, str(datetime.date.today())), False)
-                await bot.send_message(user_id, f"Тест завершен! ✨ Твой индекс: {final}%", reply_markup=MAIN_KB)
+                await bot.send_message(user_id, f"Мы закончили! ✨ Твой индекс: {final}%", reply_markup=MAIN_KB)
         return
 
     if "Аналитика" in text:
@@ -101,10 +108,11 @@ async def handle_msg(update: Update):
         return
 
     if "Помощь" in text:
-        await bot.send_message(user_id, "Давай заземлимся. Техника 5-4-3-2-1: назови 5 предметов вокруг... Я рядом. ✨", reply_markup=MAIN_KB)
+        ans = ask_ai(user_id, "Мне нужна помощь", name, mode="help")
+        await bot.send_message(user_id, ans, reply_markup=MAIN_KB)
         return
 
-    # 2. По умолчанию: AI чат
+    # 3. AI Чат
     await bot.send_chat_action(user_id, "typing")
     ans = ask_ai(user_id, text, name)
     await bot.send_message(user_id, ans, reply_markup=MAIN_KB)
