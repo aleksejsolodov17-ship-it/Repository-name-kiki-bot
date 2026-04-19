@@ -1,4 +1,5 @@
 flask
-python-telegram-bot==22.7
-matplotlib
+python-telegram-bot
 gigachat
+matplotlib
+apscheduler
